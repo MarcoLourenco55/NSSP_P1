@@ -1,3 +1,5 @@
+# This file was initially done by hand and based on the Lab7
+# It was then adjusted and adapted using ChatGPT-5
 from __future__ import annotations
 
 import sys
