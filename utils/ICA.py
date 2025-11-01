@@ -11,6 +11,7 @@ import pandas as pd
 import nibabel as nib
 import matplotlib.pyplot as plt
 from kneed import KneeLocator
+from scipy.ndimage import label
 
 from nilearn.image import (
     load_img,
@@ -24,6 +25,7 @@ from nilearn.masking import compute_epi_mask
 from nilearn.maskers import NiftiMasker
 from nilearn.decomposition import CanICA
 from nilearn.plotting import plot_stat_map
+from nilearn.image import resample_to_img, smooth_img
 
 plt.rcParams["figure.dpi"] = 120
 
@@ -260,7 +262,7 @@ def run_ica_canica(
     canica = CanICA(
         n_components=n_components,
         mask=mask_img,
-        smoothing_fwhm=None,
+        smoothing_fwhm=30.0,
         standardize=True,
         random_state=random_state,
         t_r=t_r,
@@ -279,23 +281,23 @@ def run_ica_canica(
 def plot_ica_overlays_axial(
     components_img,
     anat_img: str,
+    mask_img,  # <— NEW
     out_dir: Optional[str] = None,
     display_cuts: int = 8,
     dpi: int = 120,
     skip_existing: bool = True,
     verbose: bool = False,
+    percentile: float = 98.5,  # <— NEW: use 98–99 for cleaner blobs
+    min_cluster: int = 40,  # <— NEW: remove tiny specks (voxels)
+    smooth_fwhm_display: Optional[float] = None,  # e.g., 3–5 mm
 ) -> None:
-    """
-    Save one axial overlay per component.
-    The anatomy is resampled once onto the component grid.
-    Each map is thresholded at its 95th percentile of |value|.
-    """
+    """Save axial overlays; threshold by top-|values| inside the mask."""
     if out_dir:
         Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     n_components = components_img.shape[-1]
-
     comp0 = index_img(components_img, 0)
+
     anat_rs = resample_to_img(
         load_img(anat_img),
         comp0,
@@ -303,6 +305,10 @@ def plot_ica_overlays_axial(
         force_resample=True,
         copy_header=True,
     )
+    mask_rs = resample_to_img(
+        mask_img, comp0, interpolation="nearest", force_resample=True, copy_header=True
+    )
+    brain = mask_rs.get_fdata().astype(bool)
 
     for k in range(n_components):
         out_png = Path(out_dir) / f"ica_component_{k:02d}.png" if out_dir else None
@@ -312,27 +318,42 @@ def plot_ica_overlays_axial(
             continue
 
         img_k = index_img(components_img, k)
-        data = np.abs(img_k.get_fdata())
-        thr = np.percentile(data[np.isfinite(data)], 95.0)
+        data = img_k.get_fdata()
+        vals = np.abs(data[brain])
+        thr = np.percentile(vals, percentile)
+
+        kept = np.zeros_like(data)
+        inmask = np.abs(data) >= thr
+        kept[inmask & brain] = data[inmask & brain]
+
+        # optional de-speckling
+        if min_cluster > 0 and label is not None:
+            lab, nlab = label(np.abs(kept) > 0)
+            if nlab > 0:
+                sizes = np.bincount(lab.ravel())
+                drop = sizes < min_cluster
+                drop[0] = False
+                kept[drop[lab]] = 0
+
+        img_disp = new_img_like(img_k, kept)
+        if smooth_fwhm_display:
+            img_disp = smooth_img(img_disp, smooth_fwhm_display)
 
         display = plot_stat_map(
-            img_k,
+            img_disp,
             bg_img=anat_rs,
             display_mode="z",
             cut_coords=display_cuts,
-            threshold=thr,
+            threshold=0,
             colorbar=False,
-            title=f"ICA component {k} (|thr|≥{thr:.3g})",
+            title=f"ICA component {k} (top {100 - percentile:.1f}% |values| in-mask)",
         )
         if out_png is not None:
             display.savefig(str(out_png), dpi=dpi)
         display.close()
 
-        if verbose:
-            print(f"[overlays] saved {k+1}/{n_components}")
-
     print(
-        f"[plot_ica_overlays_axial] Plotted up to {n_components} components."
+        f"[plot_ica_overlays_axial] Plotted {n_components} components."
         + (f" Saved to {out_dir}." if out_dir else "")
     )
 

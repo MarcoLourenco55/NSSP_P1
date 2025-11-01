@@ -33,7 +33,7 @@ def _paths_from_project_root(project_root: Path) -> dict[str, Path]:
         "fmri": project_root
         / "Preprocessing"
         / "Functional"
-        / "subj_concat_var1_mc_s5mm.nii",
+        / "subj_concat_var1_mc_s6mm.nii",
         "anat": project_root
         / "Preprocessing"
         / "Structural"
@@ -76,7 +76,7 @@ def find_project_root(
 # ---------------------------------------------------------------------
 # Mask construction
 # ---------------------------------------------------------------------
-def _mask_in_functional_space(func_img, gm_pve_path: Path, gm_thresh: float = 0.25):
+def _mask_in_functional_space(func_img, gm_pve_path: Path, gm_thresh: float = 0.10):
     """
     Build a binary mask in functional space.
     If GM PVE1 exists, resample to the functional grid and threshold; otherwise
@@ -236,9 +236,13 @@ def _posthoc_reports(
     ica.plot_ica_overlays_axial(
         components_img,
         anat_img=str(anat_path),
+        mask_img=mask_img,
         out_dir=str(overlay_dir),
         display_cuts=8,
         dpi=120,
+        percentile=40,
+        min_cluster=100,
+        smooth_fwhm_display=0.2,
         skip_existing=True,
         verbose=True,
     )
