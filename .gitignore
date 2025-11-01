@@ -1,0 +1,15 @@
+# Ignore everything by default
+*
+
+# Allow directories so Git can recurse into them
+!*/
+
+# Keep Python source files
+!*.py
+!**/*.py
+
+# Keep README.md (any folder, any casing)
+!**/[Rr][Ee][Aa][Dd][Mm][Ee].[Mm][Dd]
+
+# Keep this file
+!.gitignore

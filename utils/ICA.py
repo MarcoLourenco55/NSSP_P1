@@ -1,0 +1,300 @@
+"""
+Utilities for Variant 2 ICA pipeline.
+
+Notes
+-----
+- Plotting functions save files and close figures (no notebook dependencies).
+- Overlays are optimized by resampling anatomy once to the component grid.
+"""
+
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import nibabel as nib
+import matplotlib.pyplot as plt
+
+from nilearn.image import (
+    load_img,
+    mean_img,
+    math_img,
+    new_img_like,
+    index_img,
+    resample_to_img,
+)
+from nilearn.masking import compute_epi_mask
+from nilearn.maskers import NiftiMasker
+from nilearn.decomposition import CanICA
+from nilearn.plotting import plot_stat_map
+
+plt.rcParams["figure.dpi"] = 120
+
+__all__ = [
+    "discover_fmri_runs",
+    "build_mask",
+    "extract_2d_samples",
+    "choose_n_components_elbow",
+    "run_ica_canica",
+    "plot_ica_overlays_axial",
+    "similarity_first5_abs_corr",
+    "find_project_root",
+    "index_img",
+]
+
+
+# -------------------- Discovery --------------------
+
+def discover_fmri_runs(paths_or_dirs: List[str]) -> List[str]:
+    """
+    Recursively find NIfTI files likely to be fMRI runs.
+
+    Parameters
+    ----------
+    paths_or_dirs : list of str
+        Files or directories to search.
+
+    Returns
+    -------
+    list of str
+        Absolute paths to candidate fMRI files.
+    """
+    exts = (".nii", ".nii.gz")
+    out: list[str] = []
+
+    for p in map(Path, paths_or_dirs):
+        if p.is_file() and (p.suffix.lower() in exts or "".join(p.suffixes).lower() in exts):
+            out.append(str(p.resolve()))
+        elif p.is_dir():
+            for f in p.rglob("*"):
+                if f.is_file() and (f.suffix.lower() in exts or "".join(f.suffixes).lower() in exts):
+                    if any(s in f.name.lower() for s in ["bold", "fmri"]) or "functional" in str(f.parent).lower():
+                        out.append(str(f.resolve()))
+        else:
+            warnings.warn(f"[discover_fmri_runs] Ignoring non-existent path: {p}")
+
+    # De-duplicate while keeping order
+    seen, uniq = set(), []
+    for f in out:
+        if f not in seen:
+            seen.add(f)
+            uniq.append(f)
+    return uniq
+
+
+# -------------------- Mask (optional helper) --------------------
+
+def build_mask(
+    fmri_imgs: List[str],
+    gm_pve_img: Optional[str] = None,
+    gm_thresh: float = 0.25,
+):
+    """Build a binary brain mask, optionally restricting to GM with PVE1."""
+    if gm_pve_img is not None:
+        gm = load_img(gm_pve_img)
+        mask = math_img("img > {}".format(gm_thresh), img=gm)
+        data = (mask.get_fdata() > 0).astype(np.int16)
+        return new_img_like(mask, data, copy_header=True)
+    mimg = mean_img([load_img(p) for p in fmri_imgs])
+    return compute_epi_mask(mimg)
+
+
+# -------------------- Data extraction --------------------
+
+def extract_2d_samples(
+    fmri_imgs: List[str],
+    mask_img,
+    standardize: bool = True,
+    detrend: bool = True,
+) -> Tuple[np.ndarray, NiftiMasker]:
+    """
+    Vectorize masked fMRI data into (n_samples × n_voxels) and return the masker.
+
+    General-purpose helper (not required by main.py).
+    """
+    masker = NiftiMasker(
+        mask_img=mask_img,
+        standardize=standardize,
+        detrend=detrend,
+        smoothing_fwhm=None,
+    )
+    masker.fit()
+    X_list = [masker.transform(load_img(run)) for run in fmri_imgs]
+    X = np.vstack(X_list)
+    print(f"[extract_2d_samples] X shape = {X.shape} (samples=timepoints, features=voxels-in-mask)")
+    return X, masker
+
+
+# -------------------- PCA elbow --------------------
+
+def choose_n_components_elbow(
+    X: np.ndarray,
+    max_components: Optional[int] = None,
+    plot_path: Optional[str] = None,
+    csv_path: Optional[str] = None,
+) -> int:
+    """
+    Choose a number of components via an elbow on PCA cumulative variance.
+
+    Heuristic:
+    - SVD on mean-centered X
+    - Elbow from the discrete second derivative of cumulative explained variance
+    - Min guard = 2
+    """
+    X0 = X - X.mean(axis=0, keepdims=True)
+    _, S, _ = np.linalg.svd(X0, full_matrices=False)
+    eigvals = S**2
+    var_ratio = eigvals / (eigvals.sum() + 1e-12)
+    cumvar = np.cumsum(var_ratio)
+
+    kmax = len(cumvar) if max_components is None else min(max_components, len(cumvar))
+    d2 = np.diff(np.diff(cumvar))
+    k_elbow = max(2, min((int(np.argmax(d2) + 2) if d2.size else min(20, kmax)), kmax))
+
+    if csv_path:
+        np.savetxt(csv_path, cumvar, delimiter=",")
+    if plot_path:
+        plt.figure(figsize=(6, 4))
+        plt.plot(np.arange(1, len(cumvar) + 1), cumvar, marker="o", lw=1)
+        plt.axvline(k_elbow, ls="--", label=f"elbow ≈ {k_elbow}")
+        plt.xlabel("Number of components (PCA)")
+        plt.ylabel("Cumulative explained variance")
+        plt.title("PCA cumulative variance & elbow")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=150)
+        plt.close()
+
+    print(f"[choose_n_components_elbow] n_components = {k_elbow}")
+    return k_elbow
+
+
+# -------------------- ICA --------------------
+
+def run_ica_canica(
+    fmri_imgs: List[str],
+    mask_img,
+    n_components: int,
+    t_r: Optional[float] = None,
+    random_state: int = 0,
+):
+    """Run Nilearn CanICA and return a 4D Nifti image with spatial components."""
+    canica = CanICA(
+        n_components=n_components,
+        mask=mask_img,
+        smoothing_fwhm=None,
+        standardize=True,
+        random_state=random_state,
+        t_r=t_r,
+        n_jobs=-1,  # parallelize where possible
+        # memory=Memory(location=...), memory_level=2  # optional caching
+    )
+    print(f"[run_ica_canica] Fitting CanICA with n_components={n_components} on {len(fmri_imgs)} run(s)...")
+    canica.fit(fmri_imgs)
+    return canica.components_img_
+
+
+# -------------------- Plotting --------------------
+
+def plot_ica_overlays_axial(
+    components_img,
+    anat_img: str,
+    out_dir: Optional[str] = None,
+    display_cuts: int = 8,
+    dpi: int = 120,
+    skip_existing: bool = True,
+    verbose: bool = False,
+) -> None:
+    """
+    Save one axial overlay per component.
+
+    - Anatomy is resampled once to the component grid for speed.
+    - Threshold = per-component 95th percentile of |map|.
+    - If `skip_existing` is True, existing PNGs are not re-generated.
+    """
+    if out_dir:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    n_components = components_img.shape[-1]
+
+    # Resample anatomy once to the first component grid
+    comp0 = index_img(components_img, 0)
+    anat_rs = resample_to_img(
+        load_img(anat_img),
+        comp0,
+        interpolation="continuous",
+        force_resample=True,
+        copy_header=True,
+    )
+
+    for k in range(n_components):
+        out_png = Path(out_dir) / f"ica_component_{k:02d}.png" if out_dir else None
+        if skip_existing and out_png is not None and out_png.exists():
+            if verbose:
+                print(f"[overlays] skip {k+1}/{n_components} (exists)")
+            continue
+
+        img_k = index_img(components_img, k)
+        data = np.abs(img_k.get_fdata())
+        thr = np.percentile(data[np.isfinite(data)], 95.0)
+
+        display = plot_stat_map(
+            img_k,
+            bg_img=anat_rs,
+            display_mode="z",
+            cut_coords=display_cuts,
+            threshold=thr,
+            colorbar=False,
+            title=f"ICA component {k} (|thr|≥{thr:.3g})",
+        )
+        if out_png is not None:
+            display.savefig(str(out_png), dpi=dpi)
+        display.close()
+
+        if verbose:
+            print(f"[overlays] saved {k+1}/{n_components}")
+
+    print(f"[plot_ica_overlays_axial] Plotted up to {n_components} components." + (f" Saved to {out_dir}." if out_dir else ""))
+
+
+# -------------------- Similarity --------------------
+
+def similarity_first5_abs_corr(
+    components_img,
+    mask_img,
+    out_csv: Optional[str] = None,
+    out_png: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Compute |Pearson r| among the first 5 spatial maps and optionally save results.
+    """
+    n_total = components_img.shape[-1]
+    n_use = min(5, n_total)
+
+    masker = NiftiMasker(mask_img=mask_img, standardize=False, detrend=False)
+    masker.fit()
+    vecs = [masker.transform(index_img(components_img, k)).ravel() for k in range(n_use)]
+    V = np.vstack(vecs)
+
+    sim = np.abs(np.corrcoef(V))
+    labels = [f"IC{k}" for k in range(n_use)]
+    df = pd.DataFrame(sim, index=labels, columns=labels)
+
+    if out_csv:
+        df.to_csv(out_csv, float_format="%.6f")
+    if out_png:
+        plt.figure(figsize=(4.5, 4))
+        im = plt.imshow(sim, vmin=0, vmax=1, interpolation="nearest")
+        plt.title("Pairwise |corr| (first 5 ICs)")
+        plt.xticks(range(n_use), labels, rotation=45, ha="right")
+        plt.yticks(range(n_use), labels)
+        plt.colorbar(im, fraction=0.046, pad=0.04)
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=150)
+        plt.close()
+
+    return df
+
