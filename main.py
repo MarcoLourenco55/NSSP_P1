@@ -18,7 +18,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from G_code import _04_ICA as ica
-
+from G_code import Structural_preprocessing as struct
 
 # ---------------------------------------------------------------------
 # Small helpers
@@ -290,6 +290,9 @@ def main() -> None:
     _log(f"t_r = {t_r} (None means not used)")
     if force:
         _log("FORCE mode: existing artifacts will be recomputed")
+
+    _log("Running structural preprocessing (BET + FAST)")
+    struct.main(project_root)
 
     mask_path = outdir / "mask_func_space.nii.gz"
     if mask_path.exists() and not force:
