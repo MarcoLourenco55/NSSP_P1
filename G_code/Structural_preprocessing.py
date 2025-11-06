@@ -12,7 +12,7 @@ from nipype.interfaces.fsl import FAST
 
 
 # -------------------------------------------------------------------
-# Helper: unzip all .nii.gz files in a directory (keep originals)
+# unzip all .nii.gz files in a directory
 # -------------------------------------------------------------------
 def unzip_outputs(directory):
     """
@@ -38,7 +38,7 @@ def unzip_outputs(directory):
         with gzip.open(gz_file, 'rb') as f_in:
             with open(nii_file, 'wb') as f_out:
                 shutil.copyfileobj(f_in, f_out)
-    print(f"✅ Unzipped all .nii.gz files in {directory} (originals kept)")
+    print(f"Unzipped all .nii.gz files in {directory} (originals kept)")
 
 
 # -------------------------------------------------------------------
