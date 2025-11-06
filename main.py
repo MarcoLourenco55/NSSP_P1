@@ -17,9 +17,10 @@ from nilearn.masking import compute_epi_mask
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-from G_code import _04_ICA as ica
 from G_code import Structural_preprocessing as struct
 from G_code import _02_funcPrep as fprep
+from G_code import _03_GLM as glm
+from G_code import _04_ICA as ica
 
 # ---------------------------------------------------------------------
 # Small helpers
@@ -331,8 +332,19 @@ def main() -> None:
     )
 
     _posthoc_reports(components_img, anat_path, mask_img, outdir, force)
+    
+    _log("Running GLM analysis stage")
+    glm_func_path = expected if expected.exists() else paths["fmri"]
 
-    _log("Done.")
+    glm.run_glm_analysis(
+        project_root=project_root,
+        func_path=glm_func_path,
+        t1w_path=anat_path,
+        events_lr=project_root / "fMRI" / "tfMRI_MOTOR_LR" / "events_LR.csv",
+        events_rl=project_root / "fMRI" / "tfMRI_MOTOR_RL" / "events_RL.csv",
+    )
+
+    _log("Pipeline complete (ICA + GLM).")
 
 
 if __name__ == "__main__":
