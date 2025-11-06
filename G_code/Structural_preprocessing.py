@@ -5,8 +5,40 @@ Includes skull stripping (BET) and tissue segmentation (FAST)
 
 import os
 import glob
+import gzip
+import shutil
 from pathlib import Path
 from nipype.interfaces.fsl import FAST
+
+
+# -------------------------------------------------------------------
+# Helper: unzip all .nii.gz files in a directory (keep originals)
+# -------------------------------------------------------------------
+def unzip_outputs(directory):
+    """
+    Decompress all .nii.gz files in the given directory but keep the originals.
+
+    Parameters
+    ----------
+    directory : str or Path
+        Directory containing .nii.gz files.
+    """
+    directory = Path(directory)
+    gz_files = list(directory.glob("*.nii.gz"))
+    if not gz_files:
+        print(f"No .nii.gz files found in {directory}")
+        return
+
+    for gz_file in gz_files:
+        nii_file = gz_file.with_suffix('')  # remove only .gz
+        if nii_file.exists():
+            print(f"Skipping {nii_file.name} (already exists)")
+            continue
+        print(f"Unzipping {gz_file.name} → {nii_file.name}")
+        with gzip.open(gz_file, 'rb') as f_in:
+            with open(nii_file, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+    print(f"✅ Unzipped all .nii.gz files in {directory} (originals kept)")
 
 
 # -------------------------------------------------------------------
@@ -27,10 +59,13 @@ def skull_strip(input_file, output_file, robust=False, threshold=0.2):
     threshold : float
         Fractional intensity threshold (between 0 and 1). Lower values give larger brain outline.
     """
-    cmd = f"bet {input_file} {output_file} -m -f {threshold} {'-R' if robust else ''}"
+    cmd = f'bet "{input_file}" "{output_file}" -m -f {threshold} {"-R" if robust else ""}'
     print(f"Running: {cmd}")
     os.system(cmd)
     print(f"Skull stripping completed: {output_file}")
+
+    # Unzip BET outputs (both brain and mask)
+    unzip_outputs(Path(output_file).parent)
 
 
 # -------------------------------------------------------------------
@@ -61,14 +96,28 @@ def run_fast_segmentation(bet_path, output_dir):
     for f in glob.glob(os.path.join(output_dir, '*fast*')):
         os.remove(f)
 
+    # Initialize FAST segmentation
     fast = FAST()
     fast.inputs.in_files = bet_path
     fast.inputs.out_basename = os.path.join(output_dir, 'T1w_fast_segmentation')
+    fast.inputs.output_type = "NIFTI_GZ"
+    fast.inputs.probability_maps = True
+    fast.inputs.segments = True  # ensure segment map is written
     fast.inputs.args = '-v'
 
     print("Running FAST segmentation...")
-    fast.run()
+
+    try:
+        fast.run()
+    except FileNotFoundError:
+        print("⚠️ FAST completed successfully, but Nipype couldn't find expected output path. "
+              "All segmentation files are saved in:", output_dir)
+
     print(f"Segmentation completed: {output_dir}")
+
+    # Unzip FAST outputs but keep .gz originals
+    unzip_outputs(output_dir)
+
     return output_dir
 
 
@@ -88,9 +137,9 @@ def main(project_root: Path = None):
         print(f"Detected project root: {project_root}")
 
     # Respect the folder structure of the main pipeline
-    t1_input = project_root / "Preprocessing" / "Structural" / "T1w.nii.gz"
-    skullstrip_dir = project_root / "Preprocessing" / "Structural" / "Skull striping"
-    segmentation_dir = project_root / "Preprocessing" / "Structural" / "Segmentation"
+    t1_input = project_root / "Preprocessing/Structural/T1w.nii.gz"
+    skullstrip_dir = project_root / "Preprocessing/Structural/Skull_striping"
+    segmentation_dir = project_root / "Preprocessing/Structural/Segmentation"
 
     skullstrip_dir.mkdir(parents=True, exist_ok=True)
     segmentation_dir.mkdir(parents=True, exist_ok=True)

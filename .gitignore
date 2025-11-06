@@ -4,6 +4,9 @@
 # Allow directories so Git can recurse into them
 !*/
 
+#ignore Preprocessing
+Preprocessing/
+
 # Keep Python source files
 !*.py
 !**/*.py
