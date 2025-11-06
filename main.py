@@ -19,7 +19,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from G_code import _04_ICA as ica
 from G_code import Structural_preprocessing as struct
-
+from G_code import _02_funcPrep as fprep
 
 # ---------------------------------------------------------------------
 # Small helpers
@@ -294,6 +294,20 @@ def main() -> None:
         
     _log("Running structural preprocessing (BET + FAST)")
     struct.main(project_root)
+
+    expected = project_root / "Preprocessing" / "Functional" / "subj_concat_var1_mc_s6mm.nii.gz"
+    if (not expected.exists()) or force:
+        fprep.run_from_python(
+            lr=project_root / "Preprocessing" / "Functional" / "tfMRI_MOTOR_LR.nii",
+            rl=project_root / "Preprocessing" / "Functional" / "tfMRI_MOTOR_RL.nii",
+            outdir=project_root / "Preprocessing" / "Functional",
+            fwhm=6.0,
+            do_fd=False,
+            t1_brain=paths["anat"],
+            apply_4d_to_t1=False,
+        )
+    else:
+        _log(f"Skipping FSL preproc (found {expected})")
 
     mask_path = outdir / "mask_func_space.nii.gz"
     if mask_path.exists() and not force:
